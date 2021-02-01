@@ -78,10 +78,10 @@ def _atom_to_vector(atom):
     vec += new_vec
 
     # 12 bins for Gasteiger charge: [-0.6, +0.6]
-    new_vec = [0] * 12
-    gast = float(atom.GetProp('_GasteigerCharge'))
-    new_vec[int(min(max(gast + 0.6, 0), 1.1) * 10)] = 1
-    vec += new_vec
+    #new_vec = [0] * 12
+    #gast = float(atom.GetProp('_GasteigerCharge'))
+    #new_vec[int(min(max(gast + 0.6, 0), 1.1) * 10)] = 1
+    #vec += new_vec
 
     return np.array(vec, dtype=DTYPE)
 
@@ -172,7 +172,9 @@ def make_rec_graph(rec_ag):
     num_nodes = len(resnums)
     src, dst = [], []
     for i in range(num_nodes):
-        for j in range(i, num_nodes):
+        src += [i]
+        dst += [i]
+        for j in range(i+1, num_nodes):
             if abs(resnums[i] - resnums[j]) == 1:
                 src += [i, j]
                 dst += [j, i]
@@ -180,7 +182,7 @@ def make_rec_graph(rec_ag):
     G = dgl.graph((src, dst))
     G.ndata['x'] = torch.tensor(coords)
     G.ndata['f'] = torch.tensor(features)[..., None]
-    G.ndata['sidechain_vector'] = torch.tensor(vecs)
+    G.ndata['sidechain_vector'] = torch.tensor(vecs)[:, None, :]
     G.edata['d'] = torch.tensor(coords[dst] - coords[src])
     return G
 
@@ -236,11 +238,11 @@ class LigandDataset(Dataset):
 
     def __getitem__(self, ix):
         item = self.data[ix]
-        case_dir = self.dataset_dir / 'cases' / item['sdf_id']
+        case_dir = self.dataset_dir / 'data' / item['sdf_id']
         rec_ag = prody.parsePDB(case_dir / 'rec.pdb')
-        crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=False)
+        crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=True)
         crys_lig_ag = utils.mol_to_ag(crys_lig_rd)
-        lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb')
+        lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb').heavy.copy()
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
 
         # select one pose
@@ -266,31 +268,41 @@ class LigandDataset(Dataset):
             'rec_graph': rec_G,
             'lig_graph': lig_G,
             'lig_elements': pose_ag.getElements(),
-            'crys_coords': crys_lig_ag.getCoords().astype(DTYPE),
-            'lig_rmsd': pose_rmsd
+            'lig_coords': pose_ag.getCoords().astype(DTYPE),
+            'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE)[None, :]),
+            'crys_rmsd': pose_rmsd
         }
+        #print('old', pose_rmsd)
         return sample
 
 
 def main():
-    ds = LigandDataset('dataset', 'train_split/train.json')
+    ds = LigandDataset('dataset', 'train_split/test.json')
     item = ds[0]
     print(item)
-    from model import SE3Transformer
+    from model import SE3Transformer, SE3Refine
     G = item['lig_graph']
     trans = SE3Transformer(
         num_layers=2,
-        atom_feature_size=52,
+        in_structure=[(52, 0)],
         num_channels=52,
         out_structure=[(10, 0), (1, 1)],
         num_degrees=4,
         edge_dim=8,
         div=4,
-        pooling=False
+        pooling='avg',
+        num_fc=0
     )
-    out = trans(G)
-    print(out['0'].shape)
-    print(out['1'].shape)
+    #out = trans(G, {'0': 'f'})
+    #print(out.shape)
+
+    device = 'cuda:0'
+    trans = SE3Refine(21, 0, 40, 8, emb_size=32, num_layers=3).to(device)
+    trans.eval()
+    trans(item['rec_graph'].to(device), item['lig_graph'].to(device))
+
+    #print(out['0'].shape)
+    #print(out['1'].shape)
 
 
 if __name__ == '__main__':
