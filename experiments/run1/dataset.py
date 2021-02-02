@@ -11,6 +11,7 @@ import mdtraj as md
 import os
 import tempfile
 import dgl
+import traceback
 from path import Path
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -161,8 +162,14 @@ def make_rec_graph(rec_ag):
     features = []
     vecs = []
     for _, r in enumerate(rec_ag.getHierView().iterResidues()):
-        coords.append(r.select('name CA').getCoords()[0])
-        vecs.append(_get_sidechain_vec(r))
+        try:
+            vec = _get_sidechain_vec(r)
+            ca_crd = r.select('name CA').getCoords()[0]
+        except:
+            traceback.print_exc()
+            continue
+        vecs.append(vec)
+        coords.append(ca_crd)
         resnums.append(r.getResnum())
         features.append(_residue_to_vec(r))
     coords = np.stack(coords).astype(DTYPE)
@@ -185,17 +192,6 @@ def make_rec_graph(rec_ag):
     G.ndata['sidechain_vector'] = torch.tensor(vecs)[:, None, :]
     G.edata['d'] = torch.tensor(coords[dst] - coords[src])
     return G
-
-
-#def make_graph(rec_ag, lig_ag, lig_rd, bsite_radius=8):
-#    lig_nx, lig_nfeats, lig_edges, lig_efeats = make_lig_graph(lig_ag, lig_rd)
-#
-#    bsite = rec_ag.protein.select(f'same residue as within {bsite_radius} of lig', lig_ag).copy()
-#    rec_nx, rec_nfeats, rec_edges, rec_efeats = make_rec_graph(bsite)
-#
-#    G = dgl.DGLGraph((src, dst))
-#
-#    return G
 
 
 class LigandDataset(Dataset):
@@ -246,7 +242,7 @@ class LigandDataset(Dataset):
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
 
         # select one pose
-        pose_id = 0
+        pose_id = 0 #np.random.choice(range(lig_poses.numCoordsets()))
         pose_ag = lig_poses.copy()
         pose_ag._setCoords(pose_ag.getCoordsets(pose_id), overwrite=True)
         pose_rmsd = lig_rmsds[pose_id]
@@ -258,9 +254,13 @@ class LigandDataset(Dataset):
             pose_ag = tr.apply(pose_ag)
             crys_lig_ag = tr.apply(crys_lig_ag)
 
-        lig_G = make_lig_graph(pose_ag, crys_lig_rd)
-        bsite = rec_ag.protein.select(f'same residue as within {self.bsite_radius} of lig', lig=pose_ag).copy()
-        rec_G = make_rec_graph(bsite)
+        try:
+            lig_G = make_lig_graph(pose_ag, crys_lig_rd)
+            bsite = rec_ag.protein.select(f'same residue as within {self.bsite_radius} of lig', lig=pose_ag).copy()
+            rec_G = make_rec_graph(bsite)
+        except:
+            print('Exception for', case_dir)
+            raise
 
         sample = {
             'id': ix,
@@ -272,7 +272,7 @@ class LigandDataset(Dataset):
             'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE)[None, :]),
             'crys_rmsd': pose_rmsd
         }
-        #print('old', pose_rmsd)
+        print('old_rmsd', pose_rmsd)
         return sample
 
 

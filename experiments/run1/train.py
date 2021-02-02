@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch.optim
 import prody
 import numpy as np
+from tqdm import tqdm
 from path import Path
 from torch.utils.data import DataLoader
 
@@ -23,7 +24,7 @@ from model import SE3Refine
 def get_rmsd_loss():
     def loss_fn(y_pred, y_true):
         rmsd = torch.pow(y_pred[:, 1] - y_true, 2).sum(2).mean(1).mean()
-        #print('new_loss', rmsd.sqrt())
+        print('new_rmsd', rmsd.sqrt())
         #print('old_loss', torch.pow(y_pred[:, 0] - y_true, 2).sum(2).mean(1).mean().sqrt())
         return rmsd
     return loss_fn
@@ -108,16 +109,18 @@ def train(
     train_data = utils.read_json(Path(dataset_dir) / train_set)
     train_subset = np.where([x['affinity'] is not None for x in train_data])[0]
     print(len(train_subset))
-    train_set = LigandDataset(dataset_dir, train_set, subset=train_subset, random_rotation=True)
+    train_set = LigandDataset(dataset_dir, train_set, subset=train_subset, random_rotation=True, bsite_radius=6)
     train_loader = train_set
+    #[x for x in enumerate(tqdm(train_set))]
     #train_loader = DataLoader(dataset=train_set, batch_size=batch_size, num_workers=ncores, shuffle=True)
 
     logger.info('Creating validation dataset..')
     valid_data = utils.read_json(Path(dataset_dir) / valid_set)
     valid_subset = np.where([x['affinity'] is not None for x in valid_data])[0]
     print(len(valid_subset))
-    valid_set = LigandDataset(dataset_dir, valid_set, subset=valid_subset, random_rotation=True)
+    valid_set = LigandDataset(dataset_dir, valid_set, subset=valid_subset, random_rotation=True, bsite_radius=6)
     valid_loader = valid_set
+    #[x for x in enumerate(tqdm(valid_set))]
     #valid_loader = DataLoader(dataset=valid_set, batch_size=batch_size, num_workers=ncores, shuffle=False)
 
     optimizer = torch.optim.Adam
@@ -166,7 +169,7 @@ def main():
     # get last computed epoch
     last_epoch = _last_epoch(outdir)
 
-    model = SE3Refine(21, 0, 40, 8, emb_size=32, num_layers=3)
+    model = SE3Refine(21, 0, 40, 8, emb_size=64, num_layers=3)
 
     train('dataset',
           'train_split/train.json',
