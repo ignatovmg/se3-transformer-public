@@ -89,11 +89,11 @@ def main():
     rec_pdb = (case_dir / 'rec.pdb').abspath()
     lig_pdb = (case_dir / 'lig_clus.pdb').abspath()
     crys_mol = (case_dir / 'lig_orig.mol').abspath()
-    checkpoint = Path('run/checkpoint_17.tar').abspath()
+    checkpoint = Path('run/checkpoint_1.tar').abspath()
     #oldpwd = Path.getcwd()
     wdir = Path('docking').mkdir_p()
     with cwd(wdir):
-        refine(rec_pdb, lig_pdb, crys_mol, checkpoint, device='cuda:1', nsteps=1, crys_mol=crys_mol)
+        refine(rec_pdb, lig_pdb, crys_mol, checkpoint, device='cuda:1', nsteps=10, crys_mol=crys_mol)
 
 
 if __name__ == '__main__':

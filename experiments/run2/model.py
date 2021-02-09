@@ -110,7 +110,7 @@ class SE3Refine(nn.Module):
 
         edge_types = torch.zeros((rec.num_edges() + lig.num_edges() + rec.num_nodes() * lig.num_nodes() * 2, 3), dtype=dtype, device=device)
         edge_types[:rec.num_edges(), 0] = 1
-        edge_types[rec.num_edges():lig.num_edges(), 1] = 1
+        edge_types[rec.num_edges():rec.num_edges()+lig.num_edges(), 1] = 1
         edge_types[rec.num_edges()+lig.num_edges():, 2] = 1
 
         G = dgl.graph((src, dst), device=device)
