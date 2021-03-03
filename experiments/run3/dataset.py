@@ -17,7 +17,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from sblu.ft import apply_ftresult
 from scipy.spatial.transform import Rotation
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from tqdm import tqdm
 
 #from dgl.data import DGLDataset
@@ -98,13 +98,13 @@ def _bond_to_vector(bond):
     return np.array(vec, dtype=DTYPE_FLOAT)
 
 
-def make_lig_graph(lig_ag, lig_rd):
+def make_lig_graph(lig_ag, lig_rd, connect_all=False, self_edge=False, include_hs=False):
     AllChem.ComputeGasteigerCharges(lig_rd, throwOnParamFailure=True)
 
     mol_atoms = []
     node_features = []
     for atom in lig_rd.GetAtoms():
-        if atom.GetSymbol() == 'H':
+        if not include_hs and atom.GetSymbol() == 'H':
             continue
         node_features.append(_atom_to_vector(atom))
         mol_atoms.append(atom.GetIdx())
@@ -117,17 +117,26 @@ def make_lig_graph(lig_ag, lig_rd):
     coords = lig_ag.getCoords()[mol_atoms, :].astype(DTYPE_FLOAT)
     src, dst = [], []
     edge_features = []
-    for b in lig_rd.GetBonds():
-        edge = [b.GetBeginAtomIdx(), b.GetEndAtomIdx()]
-        if edge[0] not in mol_atoms or edge[1] not in mol_atoms:
-            continue
-        src += [mol_atoms.index(edge[0]), mol_atoms.index(edge[1])]
-        dst += [mol_atoms.index(edge[1]), mol_atoms.index(edge[0])]
-        feat = _bond_to_vector(b)
-        edge_features += [feat]*2
+    for i in mol_atoms:
+        for j in mol_atoms:
+            if i == j and not self_edge:
+                continue
+            edge = [mol_atoms.index(i), mol_atoms.index(j)]
+            bond = lig_rd.GetBondBetweenAtoms(i, j)
+            if not connect_all and bond is None:
+                continue
+                
+            feat = np.zeros(9)
+            feat[-1] = 1  # always set last bit to one
+            if bond is not None:
+                feat[:8] = _bond_to_vector(bond)
+                
+            src += edge
+            dst += [edge[1], edge[0]]
+            edge_features += [feat] * 2
+            
     edge_features = np.stack(edge_features, axis=0).astype(DTYPE_FLOAT)
-
-    #G = dgl.DGLGraph((torch.tensor(src, dtype=DTYPE_INT), torch.tensor(dst, dtype=DTYPE_INT)))
+    
     G = dgl.graph((src, dst))
     G.ndata['x'] = torch.tensor(coords)
     G.ndata['f'] = torch.tensor(node_features)[..., None]
@@ -154,7 +163,7 @@ def _residue_to_vec(r):
     return np.array(vec, dtype=DTYPE_FLOAT)
 
 
-def make_rec_graph(rec_ag):
+def make_rec_graph(rec_ag, connect_all=False, self_edge=False):
     resnums = []
     coords = []
     features = []
@@ -177,12 +186,13 @@ def make_rec_graph(rec_ag):
     num_nodes = len(resnums)
     src, dst = [], []
     for i in range(num_nodes):
-        src += [i]
-        dst += [i]
-        for j in range(i+1, num_nodes):
-            if abs(resnums[i] - resnums[j]) == 1:
-                src += [i, j]
-                dst += [j, i]
+        for j in range(num_nodes):
+            if not connect_all and abs(resnums[i] - resnums[j]) > 1:
+                continue
+            if not self_edge and i == j:
+                continue
+            src.append(i)
+            dst.append(j)
 
     G = dgl.graph((src, dst))
     G.ndata['x'] = torch.tensor(coords)
@@ -197,9 +207,11 @@ class LigandDataset(Dataset):
                  dataset_dir,
                  json_file,
                  subset=None,
-                 rmsd_bins=[(1, 2), (3, 20)],
-                 max_lig_size=50,
+                 rmsd_bins=[(1, 3), (3, 100)],
+                 max_lig_size=20,
                  bsite_radius=6,
+                 connect_all=True,
+                 self_edge=True,
                  random_rotation=True,
                  random_state=12345):
 
@@ -245,10 +257,14 @@ class LigandDataset(Dataset):
         assert len(filt_data) > 0
         self.data = filt_data
         print('Dataset size:', len(self))
+        self.label_counts = Counter([x['label'] for x in self.data])
+        print('Dataset size by labels:', self.label_counts)
 
         self.rmsd_bins = rmsd_bins
         self.num_classes = len(rmsd_bins)+1
         self.bsite_radius = bsite_radius
+        self.connect_all = connect_all
+        self.self_edge = self_edge
 
         self.random_rotation = random_rotation
         self.random_state = random_state
@@ -266,6 +282,9 @@ class LigandDataset(Dataset):
         crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=False)
         crys_lig_ag = utils_loc.mol_to_ag(crys_lig_rd)
         lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb')
+        if lig_poses is None:
+            print('Error: lig_clus.pdb in', case_dir, ' is produces None')
+            item['label'] = 0
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
         
         # select one pose
@@ -287,13 +306,13 @@ class LigandDataset(Dataset):
             crys_lig_ag = tr.apply(crys_lig_ag)
 
         try:
-            lig_G = make_lig_graph(pose_ag, crys_lig_rd)
+            lig_G = make_lig_graph(pose_ag, crys_lig_rd, connect_all=self.connect_all, self_edge=self.self_edge)
             bsite = rec_ag.protein.select(f'same residue as within {self.bsite_radius} of lig', lig=pose_ag).copy()
-            rec_G = make_rec_graph(bsite)
+            rec_G = make_rec_graph(bsite, connect_all=self.self_edge, self_edge=self.self_edge)
         except:
             print('Exception for', case_dir)
             raise
-
+            
         sample = {
             'id': ix,
             'pose_id': pose_id,
@@ -316,8 +335,27 @@ class LigandDataset(Dataset):
             'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE_FLOAT)[None, :]),
             'crys_rmsd': pose_rmsd
         }
+        
+        sample = {
+            #'id': ix,
+            #'pose_id': pose_id,
+            'label': item['label'],
+            #'case': item['sdf_id'],
+            'rec_graph': rec_G,
+            'lig_graph': lig_G,
+            #'lig_coords': pose_ag.getCoords().astype(DTYPE_FLOAT),
+            #'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE_FLOAT)[None, :]),
+            #'crys_rmsd': pose_rmsd
+        }
         #print(sample)
         return sample
+    
+    
+def collate(samples):
+        rec_graph = dgl.batch([x['rec_graph'] for x in samples])
+        lig_graph = dgl.batch([x['lig_graph'] for x in samples])
+        label = torch.tensor([x['label'] for x in samples])
+        return {'rec_graph': rec_graph, 'lig_graph': lig_graph, 'label': label}
 
 
 def main():

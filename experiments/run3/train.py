@@ -14,6 +14,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 #from pytorch_lightning.metrics import Metric, Accuracy, Precision, Recall
+from pytorch_lightning.plugins.training_type.rpc_sequential import RPCSequentialPlugin
 
 from ray.tune.integration.pytorch_lightning import TuneReportCallback
 from ray import tune
@@ -22,8 +23,8 @@ np.random.seed(123456)
 pl.seed_everything(123456)
 
 from utils_loc import logger
-from dataset import LigandDataset
-from model import SE3Score
+from dataset import LigandDataset, collate
+from model import SE3Score, SE3ScoreSequential
 from metrics import Accuracy
 
 
@@ -49,6 +50,8 @@ class LitModel(pl.LightningModule):
         y_true = [batch[y] for y in self.y_keys][0]
         y_pred = self(*x_list)
         loss = self.loss(y_pred, y_true)
+        print(y_pred)
+        print(y_true)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
         if len(self.train_metrics) > 0:
@@ -86,7 +89,7 @@ def train(
         max_epoch=100,
         load_epoch=None,
         batch_size=1,
-        ncores=1,
+        ncores=0,
         ngpu=1,
         margin=100,
         lr=0.0001,
@@ -110,6 +113,7 @@ def train(
     train_loader = DataLoader(dataset=train_set,
                               batch_size=batch_size,
                               num_workers=ncores,
+                              collate_fn=collate,
                               shuffle=True)
 
     logger.info('Creating validation dataset..')
@@ -121,6 +125,7 @@ def train(
     valid_loader = DataLoader(dataset=valid_set,
                               batch_size=batch_size,
                               num_workers=ncores,
+                              collate_fn=collate,
                               shuffle=False)
 
     if ray_tune:
@@ -130,8 +135,8 @@ def train(
     model = LitModel(
         model,
         torch.nn.CrossEntropyLoss(),
-        #['rec_graph', 'lig_graph'],
-        ['rec_src', 'rec_dst', 'rec_x', 'rec_f', 'rec_sidechain_vector', 'rec_d', 'lig_src', 'lig_dst', 'lig_x', 'lig_f', 'lig_w', 'lig_d'],
+        ['rec_graph', 'lig_graph'],
+        #['rec_src', 'rec_dst', 'rec_x', 'rec_f', 'rec_sidechain_vector', 'rec_d', 'lig_src', 'lig_dst', 'lig_x', 'lig_f', 'lig_w', 'lig_d'],
         ['label'],
         lr=lr,
         factor=0.1,
@@ -142,10 +147,12 @@ def train(
     loggers = {TensorBoardLogger(outdir + '/logs', 'tb'), CSVLogger(outdir + '/logs', 'csv')}
     checkpoint_callback = ModelCheckpoint(dirpath=outdir + '/checkpoints', monitor='valid_loss', filename='checkpoint-{epoch:02d}-{valid_loss:.2f}', save_top_k=2, mode='min')
     early_stopping = EarlyStopping(monitor='valid_loss', min_delta=0.00, patience=8, verbose=True, mode='min')
-    tune_callback = TuneReportCallback({'ray_valid_loss': 'valid_loss', 'ray_top1': 'valid_top1', 'ray_top10': 'valid_top10'}, on='validation_end')
+    tune_callback = TuneReportCallback({'ray_valid_loss': 'valid_loss', 'ray_accuracy': 'Accuracy'}, on='validation_end')
     
     trainer = pl.Trainer(
-        gpus=ngpu,
+        precision=32,
+        gpus=4,
+        accelerator='ddp',
         default_root_dir=outdir,
         log_gpu_memory='all',
         logger=loggers,
@@ -156,7 +163,7 @@ def train(
         #overfit_batches=5,
         deterministic=True,
         #profiler='simple',
-        #val_check_interval=1.0,
+        val_check_interval=0.25,
         #limit_val_batches=1000
     )
     trainer.fit(model, train_loader, valid_loader)
@@ -167,7 +174,8 @@ def main():
 
     outdir = Path(sys.argv[1]).mkdir_p()
 
-    model = SE3Score(21, 0, 33, 8, emb_size=128, num_layers1=2, num_layers2=2, fin_size=256, num_classes=3)
+    model = SE3Score(21, 0, 33, 9, emb_size=32, num_layers1=1, num_layers2=2, fin_size=256, num_classes=3)
+    #model = SE3ScoreSequential(21, 0, 33, 8, emb_size=64, num_layers1=2, num_layers2=2, fin_size=256, num_classes=3)
 
     train(outdir, 
           'dataset',

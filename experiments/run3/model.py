@@ -100,20 +100,43 @@ class SE3Transformer(nn.Module):
 class SE3Score(nn.Module):
     def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
         super().__init__()
-        self.rec = SE3Transformer(num_layers1, [(rec_feature_size, 0), (1, 1)], rec_feature_size, [(emb_size, 0)],
-                                  num_degrees=4, edge_dim=rec_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
-        self.lig = SE3Transformer(num_layers1, [(lig_feature_size, 0)], lig_feature_size, [(emb_size, 0)],
-                                  num_degrees=4, edge_dim=lig_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
-        self.cross = SE3Transformer(num_layers2, [(emb_size, 0)], emb_size, [(fin_size, 0)],
-                                    num_degrees=4, edge_dim=3, div=4, pooling='avg', n_heads=1, num_fc=3, out_fc_dim=num_classes)
-        #self.score = SE3Transformer(3, [(emb_size, 0)], emb_size, [(emb_size, 0)],
-        #                            num_degrees=4, edge_dim=3, div=4, pooling=None, n_heads=1)
-        #self.confidence = nn.Sequential(
-        #    nn.Linear(emb_size, emb_size),
-        #    nn.ReLU(inplace=True),
-        #    nn.Linear(emb_size, 1),
-        #    nn.Sigmoid()
-        #)
+        self.rec = SE3Transformer(
+            num_layers1, 
+            [(rec_feature_size, 0), (1, 1)], 
+            rec_feature_size,
+            [(emb_size, 0)],
+            num_degrees=4, 
+            edge_dim=rec_edge_dim, 
+            div=4, 
+            pooling=None, 
+            n_heads=1, 
+            num_fc=0
+        )
+        self.lig = SE3Transformer(
+            num_layers1, 
+            [(lig_feature_size, 0)], 
+            lig_feature_size, 
+            [(emb_size, 0)],
+            num_degrees=4, 
+            edge_dim=lig_edge_dim, 
+            div=4, 
+            pooling=None, 
+            n_heads=1, 
+            num_fc=0
+        )
+        self.cross = SE3Transformer(
+            num_layers2, 
+            [(emb_size, 0)], 
+            emb_size, 
+            [(fin_size, 0)],
+            num_degrees=4, 
+            edge_dim=3, 
+            div=4, 
+            pooling='avg', 
+            n_heads=1, 
+            num_fc=3, 
+            out_fc_dim=num_classes
+        )
 
     def _combine_graphs(self, rec, lig):
         dtype = rec.ndata['f'].dtype
@@ -138,7 +161,7 @@ class SE3Score(nn.Module):
         G.edata['w'] = edge_types
         return G
 
-    def forward(self, rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d):
+    def forward_old(self, rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d):
         G_rec = dgl.graph((rec_src[0], rec_dst[0]))
         G_rec.ndata['x'] = rec_x[0]
         G_rec.ndata['f'] = rec_f[0]
@@ -157,12 +180,112 @@ class SE3Score(nn.Module):
 
         G_total = self._combine_graphs(G_rec, G_lig)
         G_total.ndata['f'] = torch.cat([h_rec['0'], h_lig['0']], dim=0)
+        probs = self.cross(G_total, {'0': 'f'})
+        return probs
+    
+    def forward(self, G_rec_batch, G_lig_batch):
+        G_rec_list = dgl.unbatch(G_rec_batch)
+        G_lig_list = dgl.unbatch(G_lig_batch)
+        
+        probs_list = []
+        for G_rec, G_lig in zip(G_rec_list, G_lig_list):
+            h_rec = self.rec(G_rec, {'0': 'f', '1': 'sidechain_vector'})
+            h_lig = self.lig(G_lig, {'0': 'f'})
+
+            G_total = self._combine_graphs(G_rec, G_lig)
+            G_total.ndata['f'] = torch.cat([h_rec['0'], h_lig['0']], dim=0)
+            probs = self.cross(G_total, {'0': 'f'})
+            probs_list.append(probs)
+        return torch.cat(probs_list, dim=0)
+
+    
+class _RecModuleSequential(nn.Module):
+    def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
+        super().__init__()
+        self.block = SE3Transformer(num_layers1, [(rec_feature_size, 0), (1, 1)], rec_feature_size, [(emb_size, 0)], num_degrees=4, edge_dim=rec_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
+        
+    def forward(self, args):
+        rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d = args
+        G_rec = dgl.graph((rec_src[0], rec_dst[0]))
+        G_rec.ndata['x'] = rec_x[0]
+        G_rec.ndata['f'] = rec_f[0]
+        G_rec.ndata['sidechain_vector'] = rec_sidechain_vector[0]
+        G_rec.edata['d'] = rec_d[0]
+        h_rec = self.block(G_rec, {'0': 'f', '1': 'sidechain_vector'})
+        return [rec_src, rec_dst, rec_x, h_rec['0'][None, :], rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d]
+    
+    
+class _LigModuleSequential(nn.Module):
+    def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
+        super().__init__()
+        self.block = SE3Transformer(num_layers1, [(lig_feature_size, 0)], lig_feature_size, [(emb_size, 0)], num_degrees=4, edge_dim=lig_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
+        
+    def forward(self, args):
+        rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d = args
+        G_lig = dgl.graph((lig_src[0], lig_dst[0]))
+        G_lig.ndata['x'] = lig_x[0]
+        G_lig.ndata['f'] = lig_f[0]
+        G_lig.edata['w'] = lig_w[0]
+        G_lig.edata['d'] = lig_d[0]
+        h_lig = self.block(G_lig, {'0': 'f'})
+        return [rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, h_lig['0'][None, :], lig_w, lig_d]
+    
+    
+class _ComboModuleSequential(nn.Module):
+    def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
+        super().__init__()
+        self.block = SE3Transformer(num_layers2, [(emb_size, 0)], emb_size, [(fin_size, 0)], num_degrees=4, edge_dim=3, div=4, pooling='avg', n_heads=1, num_fc=3, out_fc_dim=num_classes)
+        
+    def _combine_graphs(self, rec, lig):
+        dtype = rec.ndata['f'].dtype
+        device = rec.ndata['f'].device
+        rec_nodes = rec.nodes()
+        lig_nodes = lig.nodes() + rec.num_nodes()
+
+        cross_edges = list(itertools.product(rec_nodes, lig_nodes))
+        src_cross = torch.tensor([x[0] for x in cross_edges], dtype=rec_nodes.dtype, device=rec_nodes.device)
+        dst_cross = torch.tensor([x[1] for x in cross_edges], dtype=rec_nodes.dtype, device=rec_nodes.device)
+        src = torch.cat([rec.edges()[0], lig.edges()[0] + rec.num_nodes(), src_cross, dst_cross])
+        dst = torch.cat([rec.edges()[1], lig.edges()[1] + rec.num_nodes(), dst_cross, src_cross])
+
+        edge_types = torch.zeros((rec.num_edges() + lig.num_edges() + rec.num_nodes() * lig.num_nodes() * 2, 3), dtype=dtype, device=device)
+        edge_types[:rec.num_edges(), 0] = 1
+        edge_types[rec.num_edges():rec.num_edges()+lig.num_edges(), 1] = 1
+        edge_types[rec.num_edges()+lig.num_edges():, 2] = 1
+
+        G = dgl.graph((src, dst), device=device)
+        G.ndata['f'] = torch.cat([rec.ndata['f'], lig.ndata['f']], dim=0)
+        G.ndata['x'] = torch.cat([rec.ndata['x'], lig.ndata['x']], dim=0)
+        G.edata['d'] = G.ndata['x'][dst] - G.ndata['x'][src]
+        G.edata['w'] = edge_types
+        return G
+        
+    def forward(self, args):
+        rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d = args
+        G_rec = dgl.graph((rec_src[0], rec_dst[0]))
+        G_rec.ndata['x'] = rec_x[0]
+        G_rec.ndata['f'] = rec_f[0]
+        G_rec.ndata['sidechain_vector'] = rec_sidechain_vector[0]
+        G_rec.edata['d'] = rec_d[0]
+        
+        G_lig = dgl.graph((lig_src[0], lig_dst[0]))
+        G_lig.ndata['x'] = lig_x[0]
+        G_lig.ndata['f'] = lig_f[0]
+        G_lig.edata['w'] = lig_w[0]
+        G_lig.edata['d'] = lig_d[0]
+        
+        G_total = self._combine_graphs(G_rec, G_lig)
         #print('coords', G_total.ndata['x'])
 
         #print(G_total.ndata['f'].shape)
-        probs = self.cross(G_total, {'0': 'f'})
-        
-        # normalize for accuracy
-        #probs = probs / probs.sum(1, keepdim=True)
-        print(probs)
-        return probs
+        probs = self.block(G_total, {'0': 'f'})
+        return probs #[rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d]
+    
+    
+def SE3ScoreSequential(rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
+    layers = [
+        _RecModuleSequential(rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes),
+        _LigModuleSequential(rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes),
+        _ComboModuleSequential(rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes)
+    ]
+    return torch.nn.Sequential(*layers)
