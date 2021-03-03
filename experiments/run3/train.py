@@ -163,7 +163,7 @@ def train(
         #overfit_batches=5,
         deterministic=True,
         #profiler='simple',
-        val_check_interval=0.25,
+        val_check_interval=0.50,
         #limit_val_batches=1000
     )
     trainer.fit(model, train_loader, valid_loader)

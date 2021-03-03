@@ -255,6 +255,9 @@ class LigandDataset(Dataset):
                 filt_data.append(new_item)
                 
         assert len(filt_data) > 0
+        
+        #filt_data = [x for x in filt_data if x['sdf_id'] == '4edn_SO4_1_C_401__R___']
+        
         self.data = filt_data
         print('Dataset size:', len(self))
         self.label_counts = Counter([x['label'] for x in self.data])
@@ -274,8 +277,8 @@ class LigandDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
-
-    def __getitem__(self, ix):
+    
+    def _get_sample(self, ix):
         item = self.data[ix]
         case_dir = self.dataset_dir / 'data' / item['sdf_id']
         rec_ag = prody.parsePDB(case_dir / 'rec.pdb')
@@ -305,13 +308,9 @@ class LigandDataset(Dataset):
             pose_ag = tr.apply(pose_ag)
             crys_lig_ag = tr.apply(crys_lig_ag)
 
-        try:
-            lig_G = make_lig_graph(pose_ag, crys_lig_rd, connect_all=self.connect_all, self_edge=self.self_edge)
-            bsite = rec_ag.protein.select(f'same residue as within {self.bsite_radius} of lig', lig=pose_ag).copy()
-            rec_G = make_rec_graph(bsite, connect_all=self.self_edge, self_edge=self.self_edge)
-        except:
-            print('Exception for', case_dir)
-            raise
+        lig_G = make_lig_graph(pose_ag, crys_lig_rd, connect_all=self.connect_all, self_edge=self.self_edge)
+        bsite = rec_ag.protein.select(f'same residue as within {self.bsite_radius} of lig', lig=pose_ag).copy()
+        rec_G = make_rec_graph(bsite, connect_all=self.self_edge, self_edge=self.self_edge)
             
         sample = {
             'id': ix,
@@ -348,6 +347,16 @@ class LigandDataset(Dataset):
             #'crys_rmsd': pose_rmsd
         }
         #print(sample)
+        return sample
+
+    def __getitem__(self, ix):
+        try:
+            sample = self._get_sample(ix)
+        except Exception as e:
+            print('Exception for', self.data[ix])
+            traceback.print_exc()
+            print('Falling back to sample #0')
+            sample = self._get_sample(0)
         return sample
     
     
