@@ -105,12 +105,12 @@ class SE3Refine(nn.Module):
         cross_edges = list(itertools.product(rec_nodes, lig_nodes))
         src_cross = torch.tensor([x[0] for x in cross_edges], dtype=rec_nodes.dtype, device=rec_nodes.device)
         dst_cross = torch.tensor([x[1] for x in cross_edges], dtype=rec_nodes.dtype, device=rec_nodes.device)
-        src = torch.cat([rec.edges()[0], lig.edges()[0], src_cross, dst_cross])
-        dst = torch.cat([rec.edges()[1], lig.edges()[1], dst_cross, src_cross])
+        src = torch.cat([rec.edges()[0], lig.edges()[0] + rec.num_nodes(), src_cross, dst_cross])
+        dst = torch.cat([rec.edges()[1], lig.edges()[1] + rec.num_nodes(), dst_cross, src_cross])
 
         edge_types = torch.zeros((rec.num_edges() + lig.num_edges() + rec.num_nodes() * lig.num_nodes() * 2, 3), dtype=dtype, device=device)
         edge_types[:rec.num_edges(), 0] = 1
-        edge_types[rec.num_edges():lig.num_edges(), 1] = 1
+        edge_types[rec.num_edges():rec.num_edges()+lig.num_edges(), 1] = 1
         edge_types[rec.num_edges()+lig.num_edges():, 2] = 1
 
         G = dgl.graph((src, dst), device=device)
@@ -125,9 +125,11 @@ class SE3Refine(nn.Module):
 
         G_total = self._combine_graphs(G_rec, G_lig)
         G_total.ndata['f'] = torch.cat([h_rec['0'], h_lig['0']], dim=0)
+        #print('coords', G_total.ndata['x'])
 
         #print(G_total.ndata['f'].shape)
         coord_update = self.cross(G_total, {'0': 'f'})['1'][:, 0, :]
+        #print(coord_update)
         G_total.ndata['x'] += coord_update
         G_total.edata['d'] += coord_update[G_total.edges()[1]] - coord_update[G_total.edges()[0]]
         lig_updated_coords = G_total.ndata['x'][G_rec.num_nodes():]
