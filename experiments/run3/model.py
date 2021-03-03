@@ -17,9 +17,21 @@ from equivariant_attention.fibers import Fiber
 
 class SE3Transformer(nn.Module):
     """SE(3) equivariant GCN with attention"""
-    def __init__(self, num_layers: int, in_structure: List[Tuple[int,int]], num_channels: int, out_structure: List[Tuple[int,int]],
-                 num_degrees: int=4, edge_dim: int=4, div: float=4,
-                 pooling: str='avg', n_heads: int=1, num_fc: int=0, out_fc_dim: int=1, **kwargs):
+    def __init__(
+        self,
+        num_layers: int,
+        in_structure: List[Tuple[int,int]],
+        num_channels: int,
+        out_structure: List[Tuple[int,int]],
+        num_degrees: int=4,
+        edge_dim: int=4,
+        div: float=4,
+        pooling: str='avg',
+        n_heads: int=1,
+        num_fc: int=0,
+        out_fc_dim: int=1,
+        **kwargs
+    ):
         super().__init__()
         # Build the network
         self.num_layers = num_layers
@@ -44,8 +56,7 @@ class SE3Transformer(nn.Module):
         Gblock = []
         fin = fibers['in']
         for i in range(self.num_layers):
-            Gblock.append(GSE3Res(fin, fibers['mid'], edge_dim=self.edge_dim, 
-                                  div=self.div, n_heads=self.n_heads))
+            Gblock.append(GSE3Res(fin, fibers['mid'], edge_dim=self.edge_dim, div=self.div, n_heads=self.n_heads))
             Gblock.append(GNormSE3(fibers['mid']))
             fin = fibers['mid']
         Gblock.append(GConvSE3(fibers['mid'], fibers['out'], self_interaction=True, edge_dim=self.edge_dim))
@@ -74,6 +85,9 @@ class SE3Transformer(nn.Module):
         h = {k: G.ndata[v] for k, v in node_features.items()}
         for layer in self.Gblock:
             h = layer(h, G=G, r=r, basis=basis)
+
+        for layer in self.Gblock:
+            h = layer(h)
 
         return h
 

@@ -20,13 +20,13 @@ from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
 from collections import OrderedDict
 
-from fft_ml import utils
-from fft_ml.dataset.amino_acids import residue_bonds_noh
+import utils
+from amino_acids import residue_bonds_noh
 
-DTYPE = np.float32
+DTYPE_FLOAT = np.float32
 DTYPE_INT = np.int32
 
-_ELEMENTS = {x[1]: x[0] for x in enumerate(['I', 'S', 'F', 'N', 'C', 'CL', 'BR', 'O', 'H', 'X'])}
+_ELEMENTS = {x[1]: x[0] for x in enumerate(['I', 'S', 'F', 'N', 'C', 'CL', 'BR', 'O', 'P', 'UNK'])}
 _HYBRIDIZATIONS = {x: i for i, x in enumerate(Chem.rdchem.HybridizationType.names.keys())}
 _FORMAL_CHARGE = {-1: 0, 0: 1, 1: 2}
 _VALENCE = {x: x - 1 for x in range(1, 7)}
@@ -35,56 +35,47 @@ _DEGREE = {x: x - 1 for x in range(1, 5)}
 
 
 def _atom_to_vector(atom):
-    vec = [0] * len(_ELEMENTS)
-    vec[_ELEMENTS.get(atom.GetSymbol().upper(), _ELEMENTS['X'])] = 1
+    vec = [0] * (len(_ELEMENTS) + 1)
+    vec[_ELEMENTS.get(atom.GetSymbol().upper(), _ELEMENTS['UNK'])] = 1
+
+    # total density of all atoms
+    vec[-1] = 1
 
     new_vec = [0] * len(_HYBRIDIZATIONS)
     new_vec[_HYBRIDIZATIONS[str(atom.GetHybridization())]] = 1
     vec += new_vec
 
-    new_vec = [0] * len(_FORMAL_CHARGE)
-    try:
-        new_vec[_FORMAL_CHARGE[atom.GetFormalCharge()]] = 1
-    except:
-        pass
+    #new_vec = [0] * len(_FORMAL_CHARGE)
+    #new_vec[_FORMAL_CHARGE[atom.GetFormalCharge()]] = 1
+    new_vec = [atom.GetFormalCharge()]
     vec += new_vec
 
     new_vec = [0, 0]
     new_vec[int(atom.GetIsAromatic())] = 1
     vec += new_vec
 
-    new_vec = [0] * len(_DEGREE)
-    try:
-        new_vec[_DEGREE[atom.GetTotalDegree()]] = 1
-    except:
-        pass
-    vec += new_vec
+    #new_vec = [0] * len(_DEGREE)
+    #new_vec[_DEGREE[atom.GetTotalDegree()]] = 1
+    #vec += new_vec
+    vec += [atom.GetTotalDegree()]
 
-    new_vec = [0] * len(_NUM_HS)
-    try:
-        new_vec[_NUM_HS[atom.GetTotalNumHs()]] = 1
-    except:
-        pass
-    vec += new_vec
+    #new_vec = [0] * len(_NUM_HS)
+    #new_vec[_NUM_HS[atom.GetTotalNumHs()]] = 1
+    #vec += new_vec
+    vec += [atom.GetTotalNumHs()]
 
     new_vec = [0] * len(_VALENCE)
-    try:
-        new_vec[_VALENCE[atom.GetTotalValence()]] = 1
-    except:
-        pass
+    new_vec[_VALENCE[atom.GetTotalValence()]] = 1
     vec += new_vec
 
     new_vec = [0, 0]
     new_vec[int(atom.IsInRing())] = 1
     vec += new_vec
 
-    # 12 bins for Gasteiger charge: [-0.6, +0.6]
-    #new_vec = [0] * 12
-    #gast = float(atom.GetProp('_GasteigerCharge'))
-    #new_vec[int(min(max(gast + 0.6, 0), 1.1) * 10)] = 1
-    #vec += new_vec
+    # Gasteiger charge
+    vec += [float(atom.GetProp('_GasteigerCharge'))]
 
-    return np.array(vec, dtype=DTYPE)
+    return np.array(vec, dtype=DTYPE_FLOAT)
 
 
 def _bond_to_vector(bond):
@@ -101,24 +92,26 @@ def _bond_to_vector(bond):
     new_vec = [0] * 2
     new_vec[bond.IsInRing()] = 1
     vec += new_vec
-    return np.array(vec, dtype=DTYPE)
+    return np.array(vec, dtype=DTYPE_FLOAT)
 
 
 def make_lig_graph(lig_ag, lig_rd):
-    mol_elements = np.array([x.GetSymbol().upper() for x in lig_rd.GetAtoms()])
-    pdb_elements = np.array([x.upper() for x in lig_ag.getElements()])
-    assert all(mol_elements == pdb_elements), f'Elements are different:\nRDkit: {mol_elements}\nPDB  : {pdb_elements}'
-
     AllChem.ComputeGasteigerCharges(lig_rd, throwOnParamFailure=True)
 
-    mol_atoms = range(lig_rd.GetNumAtoms())
+    mol_atoms = []
     node_features = []
-    for atom_idx in mol_atoms:
-        atom = lig_rd.GetAtomWithIdx(atom_idx)
+    for atom in lig_rd.GetAtoms():
+        if atom.GetSymbol() == 'H':
+            continue
         node_features.append(_atom_to_vector(atom))
-    node_features = np.stack(node_features, axis=0).astype(DTYPE)
+        mol_atoms.append(atom.GetIdx())
+    node_features = np.stack(node_features, axis=0).astype(DTYPE_FLOAT)
 
-    coords = lig_ag.getCoords()[mol_atoms, :].astype(DTYPE)
+    mol_elements = np.array([lig_rd.GetAtomWithIdx(idx).GetSymbol().upper() for idx in mol_atoms])
+    pdb_elements = np.array([lig_ag.getElements()[idx].upper() for idx in mol_atoms])
+    assert all(mol_elements == pdb_elements), f'Elements are different:\nRDkit: {mol_elements}\nPDB  : {pdb_elements}'
+
+    coords = lig_ag.getCoords()[mol_atoms, :].astype(DTYPE_FLOAT)
     src, dst = [], []
     edge_features = []
     for b in lig_rd.GetBonds():
@@ -127,7 +120,7 @@ def make_lig_graph(lig_ag, lig_rd):
         dst += [edge[1], edge[0]]
         feat = _bond_to_vector(b)
         edge_features += [feat]*2
-    edge_features = np.stack(edge_features, axis=0).astype(DTYPE)
+    edge_features = np.stack(edge_features, axis=0).astype(DTYPE_FLOAT)
 
     #G = dgl.DGLGraph((torch.tensor(src, dtype=DTYPE_INT), torch.tensor(dst, dtype=DTYPE_INT)))
     G = dgl.graph((src, dst))
@@ -153,7 +146,7 @@ def _residue_to_vec(r):
     keys = {x: i for i, x in enumerate(keys)}
     vec = [0] * (len(keys) + 1)
     vec[keys.get(r.getResname().upper(), len(keys))] = 1
-    return np.array(vec, dtype=DTYPE)
+    return np.array(vec, dtype=DTYPE_FLOAT)
 
 
 def make_rec_graph(rec_ag):
@@ -172,9 +165,9 @@ def make_rec_graph(rec_ag):
         coords.append(ca_crd)
         resnums.append(r.getResnum())
         features.append(_residue_to_vec(r))
-    coords = np.stack(coords).astype(DTYPE)
-    vecs = np.stack(vecs).astype(DTYPE)
-    features = np.stack(features).astype(DTYPE)
+    coords = np.stack(coords).astype(DTYPE_FLOAT)
+    vecs = np.stack(vecs).astype(DTYPE_FLOAT)
+    features = np.stack(features).astype(DTYPE_FLOAT)
 
     num_nodes = len(resnums)
     src, dst = [], []
@@ -199,8 +192,9 @@ class LigandDataset(Dataset):
                  dataset_dir,
                  json_file,
                  subset=None,
-                 #affinity_bins=(-10, 0, 1, 2, 3, 10),
-                 bsite_radius=8,
+                 rmsd_bins=[(1, 2), (4, 20)],
+                 max_lig_size=50,
+                 bsite_radius=6,
                  random_rotation=True,
                  random_state=12345):
 
@@ -219,8 +213,33 @@ class LigandDataset(Dataset):
         if subset is not None:
             self.data = [v for k, v in enumerate(self.data) if k in subset]
 
-        #self.box_size = box_size
-        #self.affinity_bins = affinity_bins
+        self.data = [x for x in self.data if x['natoms_heavy'] <= max_lig_size]
+            
+        filt_data = []
+        for x in self.data:
+            pose_rmsds = np.load(self.dataset_dir / 'data' / x['sdf_id'] / 'rmsd_clus.txt')
+            pose_dict = {}
+            for label, (a, b) in enumerate(rmsd_bins, 1):
+                pose_dict[label] = np.where((pose_rmsds >= a) & (pose_rmsds < b))[0].tolist()
+            
+            # add crystal pose
+            new_item = x.copy()
+            new_item['label'] = 0
+            new_item['poses'] = []
+            filt_data.append(x)
+                
+            # add other poses
+            for label, poses in pose_dict.items():
+                new_item = x.copy()
+                new_item['label'] = label
+                new_item['poses'] = poses
+                filt_data.append(x)
+                
+        assert len(filt_data) > 0
+        self.data = filt_data
+
+        self.rmsd_bins = rmsd_bins
+        self.num_classes = len(rmsd_bins)+1
         self.bsite_radius = bsite_radius
 
         self.random_rotation = random_rotation
@@ -236,16 +255,21 @@ class LigandDataset(Dataset):
         item = self.data[ix]
         case_dir = self.dataset_dir / 'data' / item['sdf_id']
         rec_ag = prody.parsePDB(case_dir / 'rec.pdb')
-        crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=True)
+        crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=False)
         crys_lig_ag = utils.mol_to_ag(crys_lig_rd)
-        lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb').heavy.copy()
+        lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb')
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
-
+        
         # select one pose
-        pose_id = np.random.choice(range(lig_poses.numCoordsets()))
-        pose_ag = lig_poses.copy()
-        pose_ag._setCoords(pose_ag.getCoordsets(pose_id), overwrite=True)
-        pose_rmsd = lig_rmsds[pose_id]
+        if item['label'] > 0:
+            pose_id = np.random.choice(item['poses'])
+            pose_ag = lig_poses.copy()
+            pose_ag._setCoords(pose_ag.getCoordsets(pose_id), overwrite=True)
+            pose_rmsd = lig_rmsds[pose_id]
+        else:
+            pose_id = -1
+            pose_ag = crys_lig_ag.copy()
+            pose_rmsd = 0.0
 
         if self.random_rotation:
             rotmat = self.rotations[ix].as_matrix()
@@ -265,15 +289,15 @@ class LigandDataset(Dataset):
         sample = {
             'id': ix,
             'pose_id': pose_id,
+            'label': item['label'],
             'case': item['sdf_id'],
             'rec_graph': rec_G,
             'lig_graph': lig_G,
             'lig_elements': pose_ag.getElements(),
-            'lig_coords': pose_ag.getCoords().astype(DTYPE),
-            'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE)[None, :]),
+            'lig_coords': pose_ag.getCoords().astype(DTYPE_FLOAT),
+            'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE_FLOAT)[None, :]),
             'crys_rmsd': pose_rmsd
         }
-        print('old_rmsd', pose_rmsd)
         return sample
 
 
@@ -281,7 +305,7 @@ def main():
     ds = LigandDataset('dataset', 'train_split/test.json')
     item = ds[0]
     print(item)
-    from model import SE3Transformer, SE3Refine
+    '''from model import SE3Transformer, SE3Refine
     G = item['lig_graph']
     trans = SE3Transformer(
         num_layers=2,
@@ -300,7 +324,7 @@ def main():
     device = 'cuda:0'
     trans = SE3Refine(21, 0, 40, 8, emb_size=32, num_layers=3).to(device)
     trans.eval()
-    trans(item['rec_graph'].to(device), item['lig_graph'].to(device))
+    trans(item['rec_graph'].to(device), item['lig_graph'].to(device))'''
 
     #print(out['0'].shape)
     #print(out['1'].shape)
