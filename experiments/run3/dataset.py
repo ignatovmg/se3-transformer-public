@@ -17,10 +17,13 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from sblu.ft import apply_ftresult
 from scipy.spatial.transform import Rotation
-from torch.utils.data import Dataset
 from collections import OrderedDict
+from tqdm import tqdm
 
-import utils
+#from dgl.data import DGLDataset
+from torch.utils.data import Dataset
+
+import utils_loc
 from amino_acids import residue_bonds_noh
 
 DTYPE_FLOAT = np.float32
@@ -116,8 +119,10 @@ def make_lig_graph(lig_ag, lig_rd):
     edge_features = []
     for b in lig_rd.GetBonds():
         edge = [b.GetBeginAtomIdx(), b.GetEndAtomIdx()]
-        src += edge
-        dst += [edge[1], edge[0]]
+        if edge[0] not in mol_atoms or edge[1] not in mol_atoms:
+            continue
+        src += [mol_atoms.index(edge[0]), mol_atoms.index(edge[1])]
+        dst += [mol_atoms.index(edge[1]), mol_atoms.index(edge[0])]
         feat = _bond_to_vector(b)
         edge_features += [feat]*2
     edge_features = np.stack(edge_features, axis=0).astype(DTYPE_FLOAT)
@@ -192,7 +197,7 @@ class LigandDataset(Dataset):
                  dataset_dir,
                  json_file,
                  subset=None,
-                 rmsd_bins=[(1, 2), (4, 20)],
+                 rmsd_bins=[(1, 2), (3, 20)],
                  max_lig_size=50,
                  bsite_radius=6,
                  random_rotation=True,
@@ -208,7 +213,7 @@ class LigandDataset(Dataset):
         if not self.json_file.exists():
             raise OSError(f'File {self.json_file} does not exist')
 
-        self.data = utils.read_json(self.json_file)
+        self.data = utils_loc.read_json(self.json_file)
 
         if subset is not None:
             self.data = [v for k, v in enumerate(self.data) if k in subset]
@@ -216,8 +221,8 @@ class LigandDataset(Dataset):
         self.data = [x for x in self.data if x['natoms_heavy'] <= max_lig_size]
             
         filt_data = []
-        for x in self.data:
-            pose_rmsds = np.load(self.dataset_dir / 'data' / x['sdf_id'] / 'rmsd_clus.txt')
+        for x in tqdm(self.data):
+            pose_rmsds = np.loadtxt(self.dataset_dir / 'data' / x['sdf_id'] / 'rmsd_clus.txt')
             pose_dict = {}
             for label, (a, b) in enumerate(rmsd_bins, 1):
                 pose_dict[label] = np.where((pose_rmsds >= a) & (pose_rmsds < b))[0].tolist()
@@ -226,17 +231,20 @@ class LigandDataset(Dataset):
             new_item = x.copy()
             new_item['label'] = 0
             new_item['poses'] = []
-            filt_data.append(x)
+            filt_data.append(new_item)
                 
             # add other poses
             for label, poses in pose_dict.items():
+                if len(poses) == 0:
+                    continue
                 new_item = x.copy()
                 new_item['label'] = label
                 new_item['poses'] = poses
-                filt_data.append(x)
+                filt_data.append(new_item)
                 
         assert len(filt_data) > 0
         self.data = filt_data
+        print('Dataset size:', len(self))
 
         self.rmsd_bins = rmsd_bins
         self.num_classes = len(rmsd_bins)+1
@@ -256,13 +264,13 @@ class LigandDataset(Dataset):
         case_dir = self.dataset_dir / 'data' / item['sdf_id']
         rec_ag = prody.parsePDB(case_dir / 'rec.pdb')
         crys_lig_rd = Chem.MolFromMolFile(case_dir / 'lig_orig.mol', removeHs=False)
-        crys_lig_ag = utils.mol_to_ag(crys_lig_rd)
+        crys_lig_ag = utils_loc.mol_to_ag(crys_lig_rd)
         lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb')
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
         
         # select one pose
         if item['label'] > 0:
-            pose_id = np.random.choice(item['poses'])
+            pose_id = self.random.choice(item['poses'])
             pose_ag = lig_poses.copy()
             pose_ag._setCoords(pose_ag.getCoordsets(pose_id), overwrite=True)
             pose_rmsd = lig_rmsds[pose_id]
@@ -272,7 +280,7 @@ class LigandDataset(Dataset):
             pose_rmsd = 0.0
 
         if self.random_rotation:
-            rotmat = self.rotations[ix].as_matrix()
+            rotmat = self.random.choice(self.rotations).as_matrix()
             tr = prody.Transformation(rotmat, np.array([0, 0, 0]))
             rec_ag = tr.apply(rec_ag)
             pose_ag = tr.apply(pose_ag)
@@ -291,13 +299,24 @@ class LigandDataset(Dataset):
             'pose_id': pose_id,
             'label': item['label'],
             'case': item['sdf_id'],
-            'rec_graph': rec_G,
-            'lig_graph': lig_G,
-            'lig_elements': pose_ag.getElements(),
+            'rec_src': rec_G.edges()[0], 
+            'rec_dst': rec_G.edges()[1], 
+            'rec_x': rec_G.ndata['x'], 
+            'rec_f': rec_G.ndata['f'], 
+            'rec_sidechain_vector': rec_G.ndata['sidechain_vector'], 
+            'rec_d': rec_G.edata['d'],
+            'lig_src': lig_G.edges()[0], 
+            'lig_dst': lig_G.edges()[1], 
+            'lig_x': lig_G.ndata['x'], 
+            'lig_f': lig_G.ndata['f'], 
+            'lig_w': lig_G.edata['w'], 
+            'lig_d': lig_G.edata['d'],
+            #'lig_elements': pose_ag.getElements(),
             'lig_coords': pose_ag.getCoords().astype(DTYPE_FLOAT),
             'crys_coords': torch.tensor(crys_lig_ag.getCoords().astype(DTYPE_FLOAT)[None, :]),
             'crys_rmsd': pose_rmsd
         }
+        #print(sample)
         return sample
 
 
@@ -305,7 +324,7 @@ def main():
     ds = LigandDataset('dataset', 'train_split/test.json')
     item = ds[0]
     print(item)
-    '''from model import SE3Transformer, SE3Refine
+    from model import SE3Transformer, SE3Score
     G = item['lig_graph']
     trans = SE3Transformer(
         num_layers=2,
@@ -320,11 +339,13 @@ def main():
     )
     #out = trans(G, {'0': 'f'})
     #print(out.shape)
+    print(item['lig_graph'].ndata['f'].shape)
 
     device = 'cuda:0'
-    trans = SE3Refine(21, 0, 40, 8, emb_size=32, num_layers=3).to(device)
+    #def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2):
+    trans = SE3Score(21, 0, 33, 8, emb_size=32, num_layers1=1, num_layers2=1, num_classes=4).to(device)
     trans.eval()
-    trans(item['rec_graph'].to(device), item['lig_graph'].to(device))'''
+    trans(item['rec_graph'].to(device), item['lig_graph'].to(device))
 
     #print(out['0'].shape)
     #print(out['1'].shape)

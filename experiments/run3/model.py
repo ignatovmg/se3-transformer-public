@@ -47,7 +47,7 @@ class SE3Transformer(nn.Module):
                        'out': Fiber(structure=out_structure)}
 
         blocks = self._build_gcn(self.fibers, num_fc, out_fc_dim)
-        self.Gblock, self.FCblock = blocks
+        self.Gblock, self.PBlock, self.FCblock = blocks
         #print(self.Gblock)
         #print(self.FCblock)
 
@@ -62,10 +62,11 @@ class SE3Transformer(nn.Module):
         Gblock.append(GConvSE3(fibers['mid'], fibers['out'], self_interaction=True, edge_dim=self.edge_dim))
 
         # Pooling
+        Pblock = []
         if self.pooling == 'avg':
-            Gblock.append(GAvgPooling())
+            Pblock = [GAvgPooling()]
         elif self.pooling == 'max':
-            Gblock.append(GMaxPooling())
+            Pblock = [GMaxPooling()]
 
         # FC layers
         FCblock = []
@@ -75,7 +76,7 @@ class SE3Transformer(nn.Module):
                 FCblock.append(nn.ReLU(inplace=True))
             FCblock.append(nn.Linear(self.fibers['out'].n_features, out_fc_dim))
 
-        return nn.ModuleList(Gblock), nn.ModuleList(FCblock)
+        return nn.ModuleList(Gblock), nn.ModuleList(Pblock), nn.ModuleList(FCblock)
 
     def forward(self, G, node_features: dict):
         # Compute equivariant weight basis from relative positions
@@ -86,21 +87,25 @@ class SE3Transformer(nn.Module):
         for layer in self.Gblock:
             h = layer(h, G=G, r=r, basis=basis)
 
-        for layer in self.Gblock:
-            h = layer(h)
+        for layer in self.PBlock:
+            h = layer(h, G)
+            
+        if len(self.FCblock) > 0:
+            for layer in self.FCblock:
+                h = layer(h)
 
         return h
 
 
-class SE3Refine(nn.Module):
-    def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2):
+class SE3Score(nn.Module):
+    def __init__(self, rec_feature_size, rec_edge_dim, lig_feature_size, lig_edge_dim, emb_size, num_layers1, num_layers2, fin_size, num_classes):
         super().__init__()
         self.rec = SE3Transformer(num_layers1, [(rec_feature_size, 0), (1, 1)], rec_feature_size, [(emb_size, 0)],
                                   num_degrees=4, edge_dim=rec_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
         self.lig = SE3Transformer(num_layers1, [(lig_feature_size, 0)], lig_feature_size, [(emb_size, 0)],
                                   num_degrees=4, edge_dim=lig_edge_dim, div=4, pooling=None, n_heads=1, num_fc=0)
-        self.cross = SE3Transformer(num_layers2, [(emb_size, 0)], emb_size, [(1, 1)],
-                                    num_degrees=4, edge_dim=3, div=4, pooling=None, n_heads=1)
+        self.cross = SE3Transformer(num_layers2, [(emb_size, 0)], emb_size, [(fin_size, 0)],
+                                    num_degrees=4, edge_dim=3, div=4, pooling='avg', n_heads=1, num_fc=3, out_fc_dim=num_classes)
         #self.score = SE3Transformer(3, [(emb_size, 0)], emb_size, [(emb_size, 0)],
         #                            num_degrees=4, edge_dim=3, div=4, pooling=None, n_heads=1)
         #self.confidence = nn.Sequential(
@@ -133,7 +138,20 @@ class SE3Refine(nn.Module):
         G.edata['w'] = edge_types
         return G
 
-    def forward(self, G_rec, G_lig):
+    def forward(self, rec_src, rec_dst, rec_x, rec_f, rec_sidechain_vector, rec_d, lig_src, lig_dst, lig_x, lig_f, lig_w, lig_d):
+        G_rec = dgl.graph((rec_src[0], rec_dst[0]))
+        G_rec.ndata['x'] = rec_x[0]
+        G_rec.ndata['f'] = rec_f[0]
+        G_rec.ndata['sidechain_vector'] = rec_sidechain_vector[0]
+        G_rec.edata['d'] = rec_d[0]
+        
+        #print(lig_src, lig_dst)
+        G_lig = dgl.graph((lig_src[0], lig_dst[0]))
+        G_lig.ndata['x'] = lig_x[0]
+        G_lig.ndata['f'] = lig_f[0]
+        G_lig.edata['w'] = lig_w[0]
+        G_lig.edata['d'] = lig_d[0]
+        
         h_rec = self.rec(G_rec, {'0': 'f', '1': 'sidechain_vector'})
         h_lig = self.lig(G_lig, {'0': 'f'})
 
@@ -142,17 +160,9 @@ class SE3Refine(nn.Module):
         #print('coords', G_total.ndata['x'])
 
         #print(G_total.ndata['f'].shape)
-        coord_update = self.cross(G_total, {'0': 'f'})['1'][:, 0, :]
-        #print(coord_update)
-        G_total.ndata['x'] += coord_update
-        G_total.edata['d'] += coord_update[G_total.edges()[1]] - coord_update[G_total.edges()[0]]
-        lig_updated_coords = G_total.ndata['x'][G_rec.num_nodes():]
-        lig_old_coords = G_lig.ndata['x']
-
-        #scores = self.score(G_total, {'0': 'f'})['0'][..., 0]
-        #conf = self.confidence(scores)
-        #return lig_updated_coords[None, :]
-
-        #print('old coords', lig_old_coords[:10])
-        #print('new coords', lig_updated_coords[:10])
-        return torch.stack([lig_old_coords, lig_updated_coords])[None, :]
+        probs = self.cross(G_total, {'0': 'f'})
+        
+        # normalize for accuracy
+        #probs = probs / probs.sum(1, keepdim=True)
+        print(probs)
+        return probs
