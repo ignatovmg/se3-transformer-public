@@ -145,7 +145,7 @@ def train(
         metrics={'Accuracy': Accuracy}
     )
     loggers = {TensorBoardLogger(outdir + '/logs', 'tb'), CSVLogger(outdir + '/logs', 'csv')}
-    checkpoint_callback = ModelCheckpoint(dirpath=outdir + '/checkpoints', monitor='valid_loss', filename='checkpoint-{epoch:02d}-{valid_loss:.2f}', save_top_k=2, mode='min')
+    checkpoint_callback = ModelCheckpoint(dirpath=outdir + '/checkpoints', monitor='valid_loss', filename='checkpoint-{epoch:02d}-{valid_loss:.2f}', save_top_k=2, mode='min', save_last=True)
     early_stopping = EarlyStopping(monitor='valid_loss', min_delta=0.00, patience=8, verbose=True, mode='min')
     tune_callback = TuneReportCallback({'ray_valid_loss': 'valid_loss', 'ray_accuracy': 'Accuracy'}, on='validation_end')
     
@@ -153,6 +153,7 @@ def train(
         precision=32,
         gpus=4,
         accelerator='ddp',
+        #plugins='ddp_sharded',
         default_root_dir=outdir,
         log_gpu_memory='all',
         logger=loggers,
@@ -165,6 +166,7 @@ def train(
         #profiler='simple',
         val_check_interval=0.50,
         #limit_val_batches=1000
+        resume_from_checkpoint=outdir + '/checkpoints/last.ckpt'
     )
     trainer.fit(model, train_loader, valid_loader)
 
