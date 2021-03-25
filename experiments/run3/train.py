@@ -29,7 +29,7 @@ from metrics import Accuracy
 
 
 class LitModel(pl.LightningModule):
-    def __init__(self, model, loss, x_keys, y_keys, lr=1e-4, factor=0.1, patience=10, metrics={}):
+    def __init__(self, model, loss, x_keys, y_keys, lr=1e-4, factor=0.5, patience=15, metrics={}):
         super().__init__()
         self.lr = lr
         self.factor = factor
@@ -65,11 +65,11 @@ class LitModel(pl.LightningModule):
         y_true = [batch[y] for y in self.y_keys][0]
         y_pred = self(*x_list)
         loss = self.loss(y_pred, y_true)
-        self.log('valid_loss', loss)
+        self.log('valid_loss', loss, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         if len(self.valid_metrics) > 0:
             for k, v in self.valid_metrics.items():
-                self.log('valid_' + k, v(y_pred, y_true))
+                self.log('valid_' + k, v(y_pred, y_true), on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -86,7 +86,7 @@ def train(
         dataset_dir,
         train_set,
         valid_set,
-        max_epoch=100,
+        max_epoch=200,
         load_epoch=None,
         batch_size=1,
         ncores=0,
@@ -146,7 +146,7 @@ def train(
     )
     loggers = {TensorBoardLogger(outdir + '/logs', 'tb'), CSVLogger(outdir + '/logs', 'csv')}
     checkpoint_callback = ModelCheckpoint(dirpath=outdir + '/checkpoints', monitor='valid_loss', filename='checkpoint-{epoch:02d}-{valid_loss:.2f}', save_top_k=2, mode='min', save_last=True)
-    early_stopping = EarlyStopping(monitor='valid_loss', min_delta=0.00, patience=8, verbose=True, mode='min')
+    early_stopping = EarlyStopping(monitor='valid_loss', min_delta=0.00, patience=50, verbose=True, mode='min')
     tune_callback = TuneReportCallback({'ray_valid_loss': 'valid_loss', 'ray_accuracy': 'Accuracy'}, on='validation_end')
     
     trainer = pl.Trainer(
@@ -155,7 +155,7 @@ def train(
         accelerator='ddp',
         #plugins='ddp_sharded',
         default_root_dir=outdir,
-        log_gpu_memory='all',
+        #log_gpu_memory='all',
         logger=loggers,
         callbacks=[checkpoint_callback, early_stopping] + ([] if not ray_tune else [tune_callback]),
         log_every_n_steps=1,
@@ -176,7 +176,7 @@ def main():
 
     outdir = Path(sys.argv[1]).mkdir_p()
 
-    model = SE3Score(21, 0, 33, 9, emb_size=32, num_layers1=1, num_layers2=2, fin_size=256, num_classes=3)
+    model = SE3Score(21, 0, 33, 9, emb_size=32, num_layers1=1, num_layers2=2, fin_size=256, num_classes=2)
     #model = SE3ScoreSequential(21, 0, 33, 8, emb_size=64, num_layers1=2, num_layers2=2, fin_size=256, num_classes=3)
 
     train(outdir, 

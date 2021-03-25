@@ -207,7 +207,7 @@ class LigandDataset(Dataset):
                  dataset_dir,
                  json_file,
                  subset=None,
-                 rmsd_bins=[(1, 3), (3, 100)],
+                 rmsd_bins=[(0, 2), (3, 100)],
                  max_lig_size=20,
                  bsite_radius=6,
                  connect_all=True,
@@ -236,18 +236,12 @@ class LigandDataset(Dataset):
         for x in tqdm(self.data):
             pose_rmsds = np.loadtxt(self.dataset_dir / 'data' / x['sdf_id'] / 'rmsd_clus.txt')
             pose_dict = {}
-            for label, (a, b) in enumerate(rmsd_bins, 1):
+            for label, (a, b) in enumerate(rmsd_bins):
                 pose_dict[label] = np.where((pose_rmsds >= a) & (pose_rmsds < b))[0].tolist()
-            
-            # add crystal pose
-            new_item = x.copy()
-            new_item['label'] = 0
-            new_item['poses'] = []
-            filt_data.append(new_item)
                 
             # add other poses
             for label, poses in pose_dict.items():
-                if len(poses) == 0:
+                if len(poses) == 0 and (rmsd_bins[label][0] > 0):
                     continue
                 new_item = x.copy()
                 new_item['label'] = label
@@ -286,20 +280,20 @@ class LigandDataset(Dataset):
         crys_lig_ag = utils_loc.mol_to_ag(crys_lig_rd)
         lig_poses = prody.parsePDB(case_dir / 'lig_clus.pdb')
         if lig_poses is None:
-            print('Error: lig_clus.pdb in', case_dir, ' is produces None')
+            print('Error: lig_clus.pdb in', case_dir, ' produces None')
             item['label'] = 0
         lig_rmsds = np.loadtxt(case_dir / 'rmsd_clus.txt')
         
         # select one pose
-        if item['label'] > 0:
+        if item['label'] == 0 and len(item['poses']) == 0:
+            pose_id = -1
+            pose_ag = crys_lig_ag.copy()
+            pose_rmsd = 0.0
+        else:
             pose_id = self.random.choice(item['poses'])
             pose_ag = lig_poses.copy()
             pose_ag._setCoords(pose_ag.getCoordsets(pose_id), overwrite=True)
             pose_rmsd = lig_rmsds[pose_id]
-        else:
-            pose_id = -1
-            pose_ag = crys_lig_ag.copy()
-            pose_rmsd = 0.0
 
         if self.random_rotation:
             rotmat = self.random.choice(self.rotations).as_matrix()
